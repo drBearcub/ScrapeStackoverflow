@@ -1,0 +1,213 @@
+Initialize
+```{r, eval=FALSE}
+library(XML)
+#install.packages("RCurl")
+library(RCurl)
+library(stringi)
+library(stringr)
+```
+
+
+Part1 Functions
+```{r, eval=FALSE}
+#get the value field of a nodeset
+#sometimes nodeset might be returned in different format depending the structure of
+#individual posts. we here accout for 2 cases : nodeset is ready to use, or node set is
+#actually an list element.
+getURLContent = function(nodeset) {
+  value = try(xmlValue(nodeset, trim = TRUE), silent = TRUE);
+  if(is.na(value) | substring(value,1,5) == "Error"){
+    value = try(xmlValue(nodeset[[1]], trim = TRUE), silent = TRUE)
+    return(value)
+  }
+  return(value)
+}
+
+#retrieve the name of the author from a string containing author name and reputation point,
+#using reputation point as a helper.
+retriveActorWithRepPts = function(actor, rep){
+  actor = strsplit(actor, rep)[[1]]
+  return(actor[1])
+}
+
+#scrape a subforum of stackoverflow from page 1
+#pagesize : specify number of posts displayed per page
+#pages : specify how many pages to scrape 
+scrapeStackoverflow = function(forum, pagesize, pages) {
+  colNames = c("Tags","Author", "Time", "Title", "Reputation", "Views", "Answers",
+               "VoteScore", "URL", "UID")
+  
+  Result = data.frame();
+
+  curURL = paste("http://stackoverflow.com/questions/tagged/",forum,"?page=1&sort=newest&pagesize=",pagesize, sep = "");
+  content = getURLContent(curURL)
+  doc = htmlParse(content, asText = TRUE)
+
+  continue = TRUE #flag used for terminating loop when reaching the last page
+  
+  while(pages != 0 & continue == TRUE)
+  {
+    pages = pages-1
+    print(pages)
+    Posts = getNodeSet(doc, "//div[@class = 'question-summary']")
+
+    #scraping items from 0 to 9
+    tags = sapply(sapply(Posts, getNodeSet, ".//a[@class = 'post-tag']"), function(x)
+      sapply(x, getValue))
+    tags = sapply(tags, function(x) paste(x, collapse = ';'))   
+
+    author = sapply(sapply(Posts, getNodeSet, ".//div[@class = 'user-details']"), getValue)
+
+    TimePosted = sapply(sapply(Posts, getNodeSet, ".//div[@class =
+                               'user-action-time']/span"), xmlAttrs)[1]
+
+    title = sapply(getNodeSet(doc, "//div[@class = 'summary']/h3/a") , xmlValue)
+
+    ReputationPoint = sapply(sapply(Posts, 
+                            getNodeSet, ".//span[@class = 'reputation-score']"),
+                            getValue)
+
+    ViewCount = sapply(getNodeSet(doc, "//div[contains(@class, 'views')]"), xmlValue)
+  
+    AnswerCount = sapply(getNodeSet(doc, "//div[@class = 'statscontainer']//strong"),
+                         xmlValue)[!(1:(length(ViewCount)*2)) %% 2]
+
+    VoteCount = sapply(sapply(Posts, getNodeSet,".//span[@class = 'vote-count-post
+                              ']/strong"), getValue)
+
+    UrlDetail = paste("http://stackoverflow.com",sapply(getNodeSet(doc,                                                          "//h3/a[@class='question-hyperlink']"), 
+                       function(x) xmlAttrs(x)[1]), sep = "")
+
+    UniqueID = sapply(
+      getNodeSet(doc, "//div[@class = 'question-summary']"),
+      function (x) strsplit(xmlAttrs(x)[2],'-')[[1]][3]
+    )
+    
+    #save results
+    curResult = cbind(tags,author, TimePosted, title, ReputationPoint, ViewCount,
+                      AnswerCount, VoteCount, UrlDetail,UniqueID)
+    colnames(curResult) = colNames
+    Result <- rbind(Result, curResult)
+
+    #next Page
+    curURL = try(xmlAttrs(getNodeSet(doc, "//a[@rel='next']")[[1]])[1], silent = TRUE)
+    if(class(curURL) != "try-error"){
+      content = getURLContent(paste("http://stackoverflow.com", curURL, sep = ""))
+      doc = htmlParse(content, asText = TRUE)
+    } else {
+      continue = FALSE;
+      print("what")
+    }
+  }
+  
+  #clean up 
+  
+  #get Author name
+  Result$Reputation = as.character(Result$Reputation)
+  Result$Author = as.character(Result$Author)
+  Result$Reputation[substr(Result$Reputation,1,5) == "Error"] = "splitter"; 
+  Result$Author = mapply(retriveActorWithRepPts, Result$Author, Result$Reputation)
+  
+  #convert viewcount to integer
+  Result$Views = as.character(Result$Views)
+  Result$Views = gsub("k", "000", str_extract(Result$Views,"[123456789]+[k]*"))
+  hehe = gsub("k", "000", str_extract(Result$Views,"[123456789]+[k]*"))
+  
+  #convert reputation point to integer
+  Result$Reputation[Result$Reputation == "splitter"] = NA
+  Result$Reputation = gsub(",", "", Result$Reputation)
+  hasK = grepl("k", Result$Reputation)
+  Result$Reputation = gsub("k", "", Result$Reputation)
+  Result$Reputation = as.numeric(Result$Reputation)
+  Result$Reputation[hasK] = Result$Reputation[hasK]*1000
+  
+  #clean tags
+  Result$Tags = as.character(Result$Tags)
+  Result$Tags = substr(Result$Tags, 0, nchar(Result$Tags)-1)
+  
+  #change rownames to numerics
+  row.names(Result) = 1:dim(Result)[1]
+  return (Result)
+}
+
+```
+
+Part2 Functions
+```{r, eval=FALSE}
+scrapePost = function(URL) {
+  colNames = c("Type", "User", "UserID", "Date", "Rep", "Score",
+               "html", "ParentUID", "PostUID")
+  
+  #this uses the number in pageURL as ID. We know the number in pageURL represent the ID for 
+  #the main question asked.
+  parentID = str_extract(URL,"/[0-9]+/")
+  parentID = substr(parentID, 2, nchar(parentID)-1)
+  
+  Result = data.frame()
+  curURL = URL
+  sof = getURLContent(curURL)
+  doc = htmlParse(sof, asText = TRUE)  
+  answer = getNodeSet(doc, "//div[@class = 'answer']") 
+  
+  for(i in 1:length(answer)){ 
+    user = xmlAttrs(getNodeSet(answer[[i]], ".//div[@class='user-details']/a")[[1]])
+    userID = str_extract(user, "[0-9]+")
+    Date = getValue(getNodeSet(answer[[i]], ".//span[@class='relativetime']"))
+    rep = getValue(getNodeSet(answer[[i]], ".//span[@class='reputation-score']"))
+    vote = getValue(getNodeSet(answer[[i]], ".//span[@class='vote-count-post ']"))
+    htmlContent = getNodeSet(answer[[i]], ".//div[@class='post-text']")[[1]]
+
+    user = substr(user, 9+nchar(userID), nchar(user))
+    
+    postUID = xmlAttrs(answer[[i]])[3]
+    
+    oneAnswerResult = cbind("Answer", user, userID ,Date, rep, vote, NA, parentID, postUID)
+    colnames(oneAnswerResult) = colNames
+    Result = rbind(Result, oneAnswerResult)
+
+    comments = getNodeSet(answer[[i]], ".//tr[@class = 'comment ']")
+    
+    for(j in 1:length(comments)) {
+      if(length(comments) >= 1){
+        commentUser = getValue(getNodeSet(comments[[j]], ".//a[@class = 'comment-user']"))
+        commentUID = xmlAttrs(getNodeSet(comments[[j]], ".//a[@class =
+                                         'comment-user']")[[1]])[1]
+        commentUID = str_extract(commentUser, "[0-9]+")
+        commentRep = xmlAttrs(getNodeSet(comments[[j]], ".//a[@class =
+                                         'comment-user']")[[1]])[2]
+        commentAnswerTime = getValue(getNodeSet(comments[[j]],
+                                                ".//span[@class='relativetime-clean']"))
+        commentUID = str_extract(xmlAttrs(comments[[j]])[1], "[0-9]+")
+        html = getNodeSet(comments[[j]], ".//span[@class = 'comment-copy']")[1]
+        
+        oneCommentResult = cbind("Comment", commentUser, commentUID, commentAnswerTime, NA,
+                                 NA, NA, postUID, commentUID)
+        colnames(oneCommentResult) = colNames
+        Result = rbind(Result, oneCommentResult)
+      }
+    }
+  }
+  row.names(Result) = 1:dim(Result)[1]
+  return(Result)
+}
+```
+
+Part 1
+```{r, eval=FALSE}
+Posts = scrapeStackoverflow("r", 50, 100)
+head(Posts)
+```
+
+Part 2
+```{r, eval=FALSE}
+Page1 = scrapePost("http://stackoverflow.com/questions/77434/how-to-access-the-last-value-in
+                   a-vector")
+Page2 = scrapePost("http://stackoverflow.com/questions/1523126/how-to-read-a-csv-file-in-r-w
+                   ere-some-numbers-contain-commas")
+Page3 = scrapePost("http://stackoverflow.com/questions/34174799/r-get-subset-from-data-frame
+                   filtering-by-year-date-value")
+
+```
+
+
+
